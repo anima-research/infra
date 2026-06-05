@@ -38,6 +38,7 @@ import {
   historySpliceCommand, executeHistorySplice,
   transcriptCommand, executeTranscript,
   getPromptCommand, executeGetPrompt,
+  getContextCommand, executeGetContext,
   forkCommand, executeFork,
   muCommand, executeMu,
   stashCommand, executeStash,
@@ -73,6 +74,7 @@ const commands = [
   historySpliceCommand,
   transcriptCommand,
   getPromptCommand,
+  getContextCommand,
   forkCommand,
   muCommand,
   stashCommand,
@@ -320,6 +322,9 @@ async function handleCommand(
       break
     case 'get_prompt':
       await executeGetPrompt(interaction, client)
+      break
+    case 'get_context':
+      await executeGetContext(interaction, client)
       break
     case 'sleep':
       await executeSleep(interaction, db, client)
