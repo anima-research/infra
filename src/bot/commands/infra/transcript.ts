@@ -33,9 +33,8 @@ export const transcriptCommand = new SlashCommandBuilder()
   )
   .addIntegerOption(opt =>
     opt.setName('limit')
-      .setDescription('Maximum messages to include (default: 200)')
+      .setDescription('Maximum messages to include (default: no limit)')
       .setMinValue(1)
-      .setMaxValue(1000)
       .setRequired(false)
   )
 
@@ -48,7 +47,7 @@ export async function executeTranscript(
   try {
     const startLink = interaction.options.getString('start', true)
     const endLink = interaction.options.getString('end')
-    const limit = interaction.options.getInteger('limit') ?? 200
+    const limit = interaction.options.getInteger('limit') ?? Infinity
 
     const startMessage = await getMessageFromLink(client, startLink)
     if (!startMessage) {
