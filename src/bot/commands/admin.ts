@@ -24,6 +24,7 @@ import { getGlobalConfig, getDefaultServerConfig, updateGlobalConfig, getGlobalC
 import { createCostOverride, getActiveSales, cancelCostOverride, getBotDescription } from '../../services/cost.js'
 import { parseDuration, expiresFromNow, formatDuration, formatTimeRemaining } from '../../utils/time.js'
 import { DEFAULT_SERVER_CONFIG } from '../../types/index.js'
+import { resolveBotTarget } from './infra/bot-target.js'
 
 export const ichorAdminCommand = new SlashCommandBuilder()
   .setName('ichor')
@@ -43,8 +44,8 @@ export const ichorAdminCommand = new SlashCommandBuilder()
     sub
       .setName('set-cost')
       .setDescription('Set bot activation cost for this server')
-      .addUserOption(opt =>
-        opt.setName('bot').setDescription('The bot to set cost for').setRequired(true))
+      .addStringOption(opt =>
+        opt.setName('bot').setDescription('Bot (account or portal)').setRequired(true).setAutocomplete(true))
       .addNumberOption(opt =>
         opt.setName('cost').setDescription('New cost in ichor').setRequired(true).setMinValue(0))
       .addStringOption(opt =>
@@ -248,8 +249,8 @@ export const ichorAdminCommand = new SlashCommandBuilder()
     sub
       .setName('sale')
       .setDescription('Set a temporary reduced cost for a bot')
-      .addUserOption(opt =>
-        opt.setName('bot').setDescription('The bot to put on sale').setRequired(true))
+      .addStringOption(opt =>
+        opt.setName('bot').setDescription('Bot (account or portal)').setRequired(true).setAutocomplete(true))
       .addNumberOption(opt =>
         opt.setName('cost').setDescription('Temporary cost in ichor').setRequired(true).setMinValue(0))
       .addStringOption(opt =>
@@ -546,7 +547,7 @@ async function executeSetCost(
   interaction: ChatInputCommandInteraction,
   db: Database
 ): Promise<void> {
-  const botUser = interaction.options.getUser('bot', true)
+  const botInput = interaction.options.getString('bot', true)
   const cost = interaction.options.getNumber('cost', true)
   const description = interaction.options.getString('description')
   const serverId = interaction.guildId
@@ -559,17 +560,19 @@ async function executeSetCost(
     return
   }
 
-  // Validate that the selected user is a bot
-  if (!botUser.bot) {
+  // Resolve to an account bot (Discord user id) or a portal bot (EMS name from
+  // the portal-<name> role). target.id is the canonical cost key.
+  const target = resolveBotTarget(interaction, botInput)
+  if (!target) {
     await interaction.reply({
-      content: `${Emoji.CROSS} **${botUser.tag}** is not a bot. Please select a bot user.`,
+      content: `${Emoji.CROSS} Could not find a bot matching **${botInput}**. Pick one from the autocomplete list (account bots and portal roles).`,
       flags: MessageFlags.Ephemeral,
     })
     return
   }
 
-  const botId = botUser.id
-  const botName = description || botUser.username
+  const botId = target.id
+  const botName = description || target.displayName
   const server = getOrCreateServer(db, serverId, interaction.guild?.name)
 
   // Check for existing cost
@@ -1975,7 +1978,7 @@ async function executeSale(
   interaction: ChatInputCommandInteraction,
   db: Database
 ): Promise<void> {
-  const botUser = interaction.options.getUser('bot', true)
+  const botInput = interaction.options.getString('bot', true)
   const cost = interaction.options.getNumber('cost', true)
   const durationStr = interaction.options.getString('duration', true)
   const serverId = interaction.guildId
@@ -1988,13 +1991,19 @@ async function executeSale(
     return
   }
 
-  if (!botUser.bot) {
+  // Resolve to an account bot (Discord user id) or a portal bot (EMS name from
+  // the portal-<name> role). target.id is the canonical cost key.
+  const target = resolveBotTarget(interaction, botInput)
+  if (!target) {
     await interaction.reply({
-      content: `${Emoji.CROSS} **${botUser.username}** is not a bot. Please select a bot user.`,
+      content: `${Emoji.CROSS} Could not find a bot matching **${botInput}**. Pick one from the autocomplete list (account bots and portal roles).`,
       flags: MessageFlags.Ephemeral,
     })
     return
   }
+
+  const botKey = target.id
+  const botLabel = target.displayName
 
   // Parse duration
   const durationMs = parseDuration(durationStr)
@@ -2021,19 +2030,19 @@ async function executeSale(
   const existing = db.prepare(`
     SELECT base_cost FROM bot_costs
     WHERE bot_discord_id = ? AND server_id = ?
-  `).get(botUser.id, server.id) as { base_cost: number } | undefined
+  `).get(botKey, server.id) as { base_cost: number } | undefined
 
   // Fall back to global cost
   const globalCost = existing ? null : db.prepare(`
     SELECT base_cost FROM bot_costs
     WHERE bot_discord_id = ? AND server_id IS NULL
-  `).get(botUser.id) as { base_cost: number } | undefined
+  `).get(botKey) as { base_cost: number } | undefined
 
   const currentBaseCost = existing?.base_cost ?? globalCost?.base_cost
 
   if (currentBaseCost === undefined) {
     await interaction.reply({
-      content: `${Emoji.CROSS} **${botUser.username}** has no cost configured. Set a base cost with \`/ichor set-cost\` first.`,
+      content: `${Emoji.CROSS} **${botLabel}** has no cost configured. Set a base cost with \`/ichor set-cost\` first.`,
       flags: MessageFlags.Ephemeral,
     })
     return
@@ -2050,7 +2059,7 @@ async function executeSale(
   // Create the override
   const { id: overrideId, replacedExisting } = createCostOverride(
     db,
-    botUser.id,
+    botKey,
     server.id,
     cost,
     currentBaseCost,
@@ -2060,7 +2069,7 @@ async function executeSale(
 
   const isSurge = cost > currentBaseCost
   const pctChange = Math.round(Math.abs(1 - cost / currentBaseCost) * 100)
-  const botName = getBotDescription(db, botUser.id, serverId) || botUser.username
+  const botName = getBotDescription(db, botKey, serverId) || botLabel
 
   const embed = new EmbedBuilder()
     .setColor(isSurge ? Colors.WARNING_ORANGE : Colors.SUCCESS_GREEN)
@@ -2086,7 +2095,7 @@ async function executeSale(
 
   logger.info({
     createdBy: interaction.user.id,
-    botId: botUser.id,
+    botId: botKey,
     botName,
     overrideCost: cost,
     originalCost: currentBaseCost,

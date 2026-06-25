@@ -58,6 +58,20 @@ export async function handleAutocomplete(
     return
   }
 
+  // Bot autocomplete for /ichor set-cost and /ichor sale — account bot members
+  // AND portal-bot roles (mirrors /sleep, /wake). The submitted value is the
+  // Discord snowflake (user id for account, portal role id), which
+  // resolveBotTarget maps to the cost key (user id for account, EMS name for
+  // portal) in the command handlers.
+  if (
+    focused.name === 'bot' &&
+    commandName === 'ichor' &&
+    (options.getSubcommand(false) === 'set-cost' || options.getSubcommand(false) === 'sale')
+  ) {
+    await interaction.respond(botTargetChoices(interaction, focused.value))
+    return
+  }
+
   // Config property autocomplete for /get_config
   if (focused.name === 'property' && commandName === 'get_config') {
     const choices = autocompleteConfigKeys(focused.value)
