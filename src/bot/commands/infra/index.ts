@@ -20,6 +20,7 @@ export { historySpliceCommand, executeHistorySplice } from './history-splice.js'
 // Debug/utility
 export { transcriptCommand, executeTranscript } from './transcript.js'
 export { getPromptCommand, executeGetPrompt } from './get-prompt.js'
+export { getContextCommand, executeGetContext } from './get-context.js'
 
 // Sleep commands
 export { sleepCommand, executeSleep, wakeCommand, executeWake } from './sleep.js'
