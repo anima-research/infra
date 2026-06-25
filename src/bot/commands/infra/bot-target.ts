@@ -48,7 +48,12 @@ export interface BotTarget {
   pinTarget: string
   /** Canonical chapterx bot name (EMS dir). Portal: role name minus prefix. */
   emsName: string
-  /** Human-facing label for command responses. */
+  /**
+   * Human-facing label for command responses and announcements. Account: the
+   * member's guild display name. Portal: the clean EMS name (role name minus
+   * the `portal-` prefix) — the prefix is plumbing and must not leak into
+   * user-facing text.
+   */
   displayName: string
 }
 
@@ -89,7 +94,11 @@ function portalTarget(role: Role): BotTarget {
     id: ems,
     pinTarget: ems,
     emsName: ems,
-    displayName: role.name,
+    // User-facing label: the clean EMS name (not the role name), so the
+    // `portal-` plumbing prefix never leaks into command replies or public
+    // /ichor sale and /sleep announcements. The autocomplete picker still shows
+    // the full `portal-<name>` role (see botTargetChoices) for selectability.
+    displayName: ems,
   }
 }
 

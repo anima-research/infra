@@ -63,6 +63,8 @@ describe('resolveBotTarget', () => {
     expect(t.id).toBe('glm52')
     expect(t.pinTarget).toBe('glm52')
     expect(t.emsName).toBe('glm52')
+    // User-facing label drops the `portal-` prefix (no plumbing in replies).
+    expect(t.displayName).toBe('glm52')
   })
   it('resolves a portal bot by explicit role mention', () => {
     const t = resolveBotTarget(chatIx(), '<@&9002>')!
