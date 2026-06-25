@@ -4,11 +4,12 @@
  * Provides autocomplete suggestions for command options
  */
 
-import { type AutocompleteInteraction, type GuildMember } from 'discord.js'
+import { type AutocompleteInteraction } from 'discord.js'
 import type { Database } from 'better-sqlite3'
 import type { BotCostRow } from '../../types/index.js'
 import { getOrCreateServer } from '../../services/user.js'
 import { autocompleteBotNames, autocompleteConfigKeys } from '../commands/infra/get-config.js'
+import { botTargetChoices } from '../commands/infra/bot-target.js'
 import { logger } from '../../utils/logger.js'
 
 export async function handleAutocomplete(
@@ -45,17 +46,15 @@ export async function handleAutocomplete(
     return
   }
 
-  // Bot autocomplete for /sleep, /wake — iterate this guild's bot members.
-  // Guild membership is the canonical source because (a) it works for any bot,
-  // not just ones registered in EMS or `bot_costs`, and (b) it gives us the
-  // Discord user ID to emit as an unambiguous `<@id>` mention in the pin —
-  // ChapterX matches pins by botId / config name / Discord username / global
-  // name / user ID, so the mention is always resolvable.
+  // Bot autocomplete for /sleep, /wake — account bot members AND portal-bot
+  // roles in this guild. The submitted value is the Discord snowflake (user id
+  // for account bots, role id for portal bots), so the command resolves it to a
+  // `<@id>` or `<@&roleId>` mention that ChapterX matches against pins.
   if (
     focused.name === 'bot' &&
     (commandName === 'sleep' || commandName === 'wake')
   ) {
-    await handleBotGuildMemberAutocomplete(interaction, focused.value)
+    await interaction.respond(botTargetChoices(interaction, focused.value))
     return
   }
 
@@ -75,52 +74,6 @@ export async function handleAutocomplete(
 
   // Default: return empty
   await interaction.respond([])
-}
-
-/**
- * Autocomplete bot users in the current guild. Filters guild members to only
- * those whose Discord user is a bot. The displayed choice name is the global
- * display name (what humans see in Discord); the submitted value is the bot's
- * Discord user ID, which /sleep will format as a `<@id>` mention in the pin.
- */
-async function handleBotGuildMemberAutocomplete(
-  interaction: AutocompleteInteraction,
-  query: string,
-): Promise<void> {
-  const guild = interaction.guild
-  if (!guild) {
-    await interaction.respond([])
-    return
-  }
-
-  const q = query.trim().toLowerCase()
-  const matches: GuildMember[] = []
-  for (const member of guild.members.cache.values()) {
-    if (!member.user.bot) continue
-    if (member.user.id === interaction.client.user?.id) continue  // don't list self
-    if (q.length > 0) {
-      const displayName = (member.displayName ?? '').toLowerCase()
-      const globalName = (member.user.globalName ?? '').toLowerCase()
-      const username = member.user.username.toLowerCase()
-      if (
-        !displayName.includes(q)
-        && !globalName.includes(q)
-        && !username.includes(q)
-      ) continue
-    }
-    matches.push(member)
-    if (matches.length >= 25) break  // Discord's hard limit on choices
-  }
-
-  // Sort alphabetically by display name for stable UX.
-  matches.sort((a, b) => a.displayName.localeCompare(b.displayName))
-
-  const choices = matches.map(m => ({
-    name: `${m.displayName} (@${m.user.username})`.slice(0, 100),  // Discord: choice name ≤ 100 chars
-    value: m.user.id,
-  }))
-
-  await interaction.respond(choices)
 }
 
 async function handleBotAutocomplete(

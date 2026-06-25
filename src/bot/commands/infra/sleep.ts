@@ -29,13 +29,13 @@ import {
   EmbedBuilder,
   type ChatInputCommandInteraction,
   type Client,
-  type GuildMember,
   type TextChannel,
   type ThreadChannel,
   type Message,
 } from 'discord.js'
 import type { Database } from 'better-sqlite3'
 import { compileConfigMessage } from '../../../infra/config-message.js'
+import { resolveBotTarget } from './bot-target.js'
 import { markPinsDirty } from '../../../infra/pin-cache.js'
 import { hasAdminRole } from '../admin.js'
 import { getOrCreateServer } from '../../../services/user.js'
@@ -60,7 +60,7 @@ export const sleepCommand = new SlashCommandBuilder()
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   .addStringOption(opt =>
     opt.setName('bot')
-      .setDescription('Bot to put to sleep (autocomplete from guild members)')
+      .setDescription('Bot to put to sleep (account or portal bot)')
       .setRequired(true)
       .setAutocomplete(true)
   )
@@ -113,15 +113,16 @@ export async function executeSleep(
   }
 
   const rawBot = interaction.options.getString('bot', true).trim()
-  const botMember = resolveBotMember(interaction, rawBot)
-  if (!botMember) {
+  const target = resolveBotTarget(interaction, rawBot)
+  if (!target) {
     await interaction.editReply({
       content: `${Emoji.CROSS} Could not find a bot matching \`${rawBot}\` in this server. Pick one from autocomplete.`,
     })
     return
   }
-  const botUserId = botMember.user.id
-  const botDisplay = botMember.displayName
+  const botKey = target.id
+  const botPinTarget = target.pinTarget
+  const botDisplay = target.displayName
 
   const durationStr = interaction.options.getString('duration') ?? undefined
   const messages = interaction.options.getInteger('messages') ?? undefined
@@ -169,13 +170,13 @@ export async function executeSleep(
   if (reason) {
     sleepBody.reason = reason
   }
-  const content = compileConfigMessage('sleep', sleepBody, [`<@${botUserId}>`])
+  const content = compileConfigMessage('sleep', sleepBody, [botPinTarget])
 
   let sleepMsg: Message
   try {
     sleepMsg = await channel.send(content)
   } catch (error) {
-    logger.error({ error, channelId: channel.id, botUserId, botDisplay }, 'Failed to send .sleep message')
+    logger.error({ error, channelId: channel.id, botKey, botDisplay, botKind: target.kind }, 'Failed to send .sleep message')
     await interaction.editReply({
       content: `${Emoji.CROSS} Failed to send .sleep message: ${error instanceof Error ? error.message : 'Unknown error'}`,
     })
@@ -197,7 +198,7 @@ export async function executeSleep(
   const sleepResult = createSleep(db, {
     serverInternalId: server.id,
     channelId: channel.id,
-    botName: botUserId,
+    botName: botKey,
     messageId: sleepMsg.id,
     startedAt,
     expiresAt,
@@ -224,7 +225,8 @@ export async function executeSleep(
     userId: interaction.user.id,
     serverId,
     channelId: channel.id,
-    botUserId,
+    botKey,
+    botKind: target.kind,
     botDisplay,
     messageId: sleepMsg.id,
     durationMs,
@@ -320,19 +322,19 @@ export async function executeWake(
   }
 
   const rawBot = interaction.options.getString('bot', true).trim()
-  const botMember = resolveBotMember(interaction, rawBot)
-  if (!botMember) {
+  const target = resolveBotTarget(interaction, rawBot)
+  if (!target) {
     await interaction.editReply({
       content: `${Emoji.CROSS} Could not find a bot matching \`${rawBot}\` in this server. Pick one from autocomplete.`,
     })
     return
   }
-  const botUserId = botMember.user.id
-  const botDisplay = botMember.displayName
+  const botKey = target.id
+  const botDisplay = target.displayName
 
   const server = getOrCreateServer(db, serverId, interaction.guild?.name)
 
-  const removed = removeSleep(db, server.id, channel.id, botUserId)
+  const removed = removeSleep(db, server.id, channel.id, botKey)
 
   if (!removed) {
     await interaction.editReply({
@@ -351,7 +353,8 @@ export async function executeWake(
     userId: interaction.user.id,
     serverId,
     channelId: channel.id,
-    botUserId,
+    botKey,
+    botKind: target.kind,
     botDisplay,
     messageId: removed.message_id,
   }, 'Sleep cleared via /wake')
@@ -376,35 +379,6 @@ export async function executeWake(
 // ============================================================================
 // Helpers
 // ============================================================================
-
-function resolveBotMember(
-  interaction: ChatInputCommandInteraction,
-  input: string,
-): GuildMember | null {
-  const guild = interaction.guild
-  if (!guild) return null
-
-  const mentionMatch = input.match(/^<@!?(\d+)>$/)
-  const asId = mentionMatch ? mentionMatch[1]! : /^\d+$/.test(input) ? input : null
-
-  if (asId) {
-    const byId = guild.members.cache.get(asId)
-    if (byId && byId.user.bot) return byId
-  }
-
-  const q = input.toLowerCase()
-  for (const m of guild.members.cache.values()) {
-    if (!m.user.bot) continue
-    if (
-      m.displayName.toLowerCase() === q
-      || (m.user.globalName ?? '').toLowerCase() === q
-      || m.user.username.toLowerCase() === q
-    ) {
-      return m
-    }
-  }
-  return null
-}
 
 async function unpinMessageIfPresent(
   channel: TextChannel | ThreadChannel,
