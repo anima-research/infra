@@ -82,17 +82,20 @@ export async function executeGetPrompt(
     let messageId = interaction.options.getString('message_id', true)
     const botFilter = interaction.options.getString('bot')
 
-    // Accept both raw message IDs and full Discord URLs
-    const urlMatch = messageId.match(/discord(?:app)?\.com\/channels\/\d+\/\d+\/(\d+)/)
+    // Accept both raw message IDs and full Discord URLs. Capture the channel/thread
+    // segment too: portal bots key traces by a relay id (`rm_<container>_<msgId>`,
+    // container = the thread or channel id), which the trace server matches exactly —
+    // so a bare-snowflake search misses. From a full link we can reconstruct that
+    // relay id and retry. (Account bots key by the native snowflake, so they match
+    // on the first pass.)
+    let urlChannelId: string | undefined
+    const urlMatch = messageId.match(/discord(?:app)?\.com\/channels\/\d+\/(\d+)\/(\d+)/)
     if (urlMatch) {
-      messageId = urlMatch[1]!
+      urlChannelId = urlMatch[1]!
+      messageId = urlMatch[2]!
     }
 
-    // Step 1: Search for traces containing this message
-    const searchParams = new URLSearchParams({ q: messageId })
-    if (botFilter) searchParams.set('bot', botFilter)
-
-    const searchResult = await traceRequest<{
+    type SearchResponse = {
       messageId: string
       results: Array<{
         traceId: string
@@ -102,11 +105,27 @@ export async function executeGetPrompt(
         success: boolean
       }>
       count: number
-    }>(`/api/search?${searchParams}`)
+    }
+
+    const searchTraces = (q: string): Promise<SearchResponse> => {
+      const searchParams = new URLSearchParams({ q })
+      if (botFilter) searchParams.set('bot', botFilter)
+      return traceRequest<SearchResponse>(`/api/search?${searchParams}`)
+    }
+
+    // Step 1: search by the bare snowflake (account bots / native ids), then fall
+    // back to the reconstructed portal relay id when a link was supplied.
+    let searchResult = await searchTraces(messageId)
+    if ((!searchResult.results || searchResult.results.length === 0) && urlChannelId) {
+      searchResult = await searchTraces(`rm_${urlChannelId}_${messageId}`)
+    }
 
     if (!searchResult.results || searchResult.results.length === 0) {
+      const portalHint = urlChannelId
+        ? ''
+        : '\n- For **portal** bots, paste the full message **link** (not just the ID) — their traces are keyed by channel + message'
       await interaction.editReply({
-        content: `❌ No trace found containing message \`${messageId}\`.${botFilter ? ` (searched bot: ${botFilter})` : ''}\n\nTips:\n- The message must have been processed by a ChapterX bot\n- Try specifying the bot name to narrow the search\n- Very old traces may have been cleaned up`,
+        content: `❌ No trace found containing message \`${messageId}\`.${botFilter ? ` (searched bot: ${botFilter})` : ''}\n\nTips:\n- The message must have been processed by a ChapterX bot\n- Try specifying the bot name to narrow the search\n- Very old traces may have been cleaned up${portalHint}`,
       })
       return
     }
@@ -215,7 +234,7 @@ function extractText(content: unknown): string {
  * - Anthropic: `system` field (string or array) + `messages` with role user/assistant
  * - OpenAI: `messages` with role system/user/assistant
  */
-function formatPromptReadable(body: Record<string, unknown>, model?: string): string {
+export function formatPromptReadable(body: Record<string, unknown>, model?: string): string {
   const lines: string[] = []
 
   // Header
@@ -230,8 +249,12 @@ function formatPromptReadable(body: Record<string, unknown>, model?: string): st
   }
   lines.push('')
 
-  // System prompt — Anthropic format (separate field)
+  // System prompt
+  //  - Anthropic: separate `system` field (string or array of text blocks)
+  //  - Gemini:    `systemInstruction.parts[].text`
+  //  - OpenAI:    a leading `system` role message, handled in the loop below
   const system = body.system
+  const geminiSystem = (body.systemInstruction as { parts?: unknown } | undefined)?.parts
   if (system) {
     lines.push('=== SYSTEM ===')
     if (typeof system === 'string') {
@@ -246,10 +269,32 @@ function formatPromptReadable(body: Record<string, unknown>, model?: string): st
       }
     }
     lines.push('')
+  } else if (Array.isArray(geminiSystem)) {
+    lines.push('=== SYSTEM ===')
+    lines.push(extractGeminiParts(geminiSystem))
+    lines.push('')
   }
 
-  // Messages
+  // Conversation — request bodies come in four shapes depending on the provider:
+  //   Anthropic / OpenAI native → `messages`
+  //   Gemini                    → `contents` (role 'user' | 'model', `parts[]`)
+  //   base/completion models    → `prompt` (a single pre-rendered string)
   const messages = body.messages as Array<Record<string, unknown>> | undefined
+  const contents = body.contents as Array<Record<string, unknown>> | undefined
+
+  if (!messages && Array.isArray(contents)) {
+    return formatGeminiContents(lines, contents)
+  }
+  if (!messages && typeof body.prompt === 'string') {
+    // Completions/base models: the formatter already rendered participant labels
+    // into a single prefill string — emit it verbatim.
+    lines.push('=== CONVERSATION ===')
+    lines.push('')
+    lines.push('--- prompt ---')
+    lines.push(body.prompt)
+    lines.push('')
+    return lines.join('\n')
+  }
   if (!messages) {
     lines.push('[no messages]')
     return lines.join('\n')
@@ -288,5 +333,39 @@ function formatPromptReadable(body: Record<string, unknown>, model?: string): st
     lines.push('')
   }
 
+  return lines.join('\n')
+}
+
+/**
+ * Extract text from a Gemini `parts[]` array, marking non-text parts.
+ * Gemini parts are `{ text }`, `{ inlineData }`, `{ functionCall }`, or
+ * `{ functionResponse }`.
+ */
+function extractGeminiParts(parts: unknown): string {
+  if (!Array.isArray(parts)) return ''
+  return parts
+    .map((p: Record<string, unknown>) => {
+      if (typeof p.text === 'string') return p.text
+      if (p.inlineData || p.inline_data) return '[image]'
+      if (p.functionCall) return `[tool_use: ${(p.functionCall as Record<string, unknown>)?.name ?? ''}]`
+      if (p.functionResponse) return '[tool_result]'
+      return ''
+    })
+    .join('')
+}
+
+/**
+ * Render a Gemini `contents[]` array as a readable transcript. Gemini uses
+ * role `'user' | 'model'`; map `model` → `assistant` to match the other formats.
+ */
+function formatGeminiContents(lines: string[], contents: Array<Record<string, unknown>>): string {
+  lines.push('=== CONVERSATION ===')
+  lines.push('')
+  for (const c of contents) {
+    const role = c.role === 'model' ? 'assistant' : 'user'
+    lines.push(`[${role}]`)
+    lines.push(extractGeminiParts(c.parts))
+    lines.push('')
+  }
   return lines.join('\n')
 }
